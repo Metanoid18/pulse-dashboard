@@ -418,8 +418,6 @@ function renderSentimentUI(fgi, label) {
 }
 
 function renderSentiment(data) {
-  fetchSentiment();
-
   const domCoins = ['BTC','ETH','SOL','BNB','Other'];
   const domPcts = [42, 18, 8, 6, 26];
   const domColors = ['#f7931a','#627eea','#9945ff','#f3ba2f','#444'];
@@ -469,7 +467,8 @@ function renderSentiment(data) {
 fetchCryptoData();
 setInterval(fetchCryptoData, 30000);
 
-// Load historical Bitcoin data for the default chart period.
+// Load independent data sources once at startup.
+fetchSentiment();
 fetchBitcoinChart();
 
 // Load Lagos weather by default
