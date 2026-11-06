@@ -33,44 +33,81 @@ const coins = [
 let prices = {};
 
 async function fetchCryptoData() {
+  const cacheKey = 'crypto_data_cache';
+  const cacheTimeKey = 'crypto_data_cache_time';
+  let cachedData = null;
+  let cachedTime = null;
+
+  // localStorage can contain invalid JSON or be unavailable in restricted contexts.
   try {
-    const ids = coins.map(c => c.id).join(',');
-    const cacheKey = 'crypto_data_cache';
-    const cacheTimeKey = 'crypto_data_cache_time';
-    const cachedData = localStorage.getItem(cacheKey);
-    const cachedTime = localStorage.getItem(cacheTimeKey);
-    
-    let data;
-    if (cachedData && cachedTime && (Date.now() - parseInt(cachedTime) < 120000)) {
-      data = JSON.parse(cachedData);
-    } else {
-      const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true`);
-      if (!res.ok) throw new Error('API error');
-      data = await res.json();
+    const rawData = localStorage.getItem(cacheKey);
+    const rawTime = localStorage.getItem(cacheTimeKey);
+    cachedData = rawData ? JSON.parse(rawData) : null;
+    cachedTime = rawTime ? Number(rawTime) : null;
+  } catch (error) {
+    console.warn('Could not read cached crypto data:', error);
+  }
+
+  const cacheIsFresh =
+    cachedData &&
+    Number.isFinite(cachedTime) &&
+    Date.now() - cachedTime < 120000;
+
+  if (cacheIsFresh) {
+    prices = cachedData;
+    renderCrypto(prices);
+    document.getElementById('last-updated').textContent =
+      'Cached · ' + new Date(cachedTime).toLocaleTimeString();
+    return;
+  }
+
+  try {
+    const ids = coins.map(coin => coin.id).join(',');
+    const url = `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true&include_market_cap=true`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      throw new Error(`CoinGecko request failed: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const hasUsablePrices = coins.some(coin =>
+      Number.isFinite(data[coin.id]?.usd)
+    );
+
+    if (!hasUsablePrices) {
+      throw new Error('CoinGecko returned an unexpected response.');
+    }
+
+    prices = data;
+    renderCrypto(prices);
+    document.getElementById('last-updated').textContent =
+      'Updated ' + new Date().toLocaleTimeString();
+
+    try {
       localStorage.setItem(cacheKey, JSON.stringify(data));
       localStorage.setItem(cacheTimeKey, Date.now().toString());
+    } catch (error) {
+      console.warn('Could not save crypto cache:', error);
     }
-    prices = data;
-    renderCrypto(data);
-    document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
-  } catch (e) {
-    // fallback with simulated data
-    const fallback = {
-      bitcoin: { usd: 67420 + Math.random()*500, usd_24h_change: (Math.random()-0.4)*6, usd_24h_vol: 32e9 },
-      ethereum: { usd: 3240 + Math.random()*80, usd_24h_change: (Math.random()-0.45)*8, usd_24h_vol: 18e9 },
-      solana: { usd: 148 + Math.random()*10, usd_24h_change: (Math.random()-0.4)*12, usd_24h_vol: 4e9 },
-      binancecoin: { usd: 410 + Math.random()*15, usd_24h_change: (Math.random()-0.45)*5, usd_24h_vol: 1.8e9 },
-      ripple: { usd: 0.52 + Math.random()*0.04, usd_24h_change: (Math.random()-0.5)*10, usd_24h_vol: 1.2e9 },
-      cardano: { usd: 0.48 + Math.random()*0.04, usd_24h_change: (Math.random()-0.5)*8, usd_24h_vol: 0.5e9 },
-      dogecoin: { usd: 0.12 + Math.random()*0.01, usd_24h_change: (Math.random()-0.5)*15, usd_24h_vol: 0.8e9 },
-      polkadot: { usd: 7.4 + Math.random()*0.5, usd_24h_change: (Math.random()-0.5)*9, usd_24h_vol: 0.3e9 }
-    };
-    prices = fallback;
-    renderCrypto(fallback);
-    document.getElementById('last-updated').textContent = 'Simulated (API offline)';
+  } catch (error) {
+    console.error('Crypto data could not be refreshed:', error);
+
+    // Prefer clearly labelled stale data over inventing market prices.
+    if (cachedData && coins.some(coin => Number.isFinite(cachedData[coin.id]?.usd))) {
+      prices = cachedData;
+      renderCrypto(prices);
+      document.getElementById('last-updated').textContent =
+        'Offline · cached data from ' +
+        (Number.isFinite(cachedTime) ? new Date(cachedTime).toLocaleTimeString() : 'an earlier session');
+      return;
+    }
+
+    prices = {};
+    renderCrypto(prices);
+    document.getElementById('last-updated').textContent = 'Market data unavailable';
   }
 }
-
 function fmt(n) {
   if (n >= 1e12) return '$' + (n/1e12).toFixed(2) + 'T';
   if (n >= 1e9) return '$' + (n/1e9).toFixed(1) + 'B';
@@ -104,7 +141,6 @@ function renderCrypto(data) {
           <span class="stat-change ${isUp?'pos':'neg'}">${isUp?'up':'down'} ${Math.abs(chg).toFixed(2)}%</span>
           <span class="stat-vol">Vol: ${fmt(d.usd_24h_vol||0)}</span>
         </div>
-        <div class="sparkline">${generateSparkline(isUp, c.color)}</div>
       </div>`;
   }).join('');
 
@@ -122,7 +158,7 @@ function renderCrypto(data) {
       </div></td>
       <td class="td-price">${fmt(d.usd)}</td>
       <td><span class="${isUp?'badge-up':'badge-dn'}">${isUp?'+':''}${chg.toFixed(2)}%</span></td>
-      <td class="mini-num">$${(d.usd * c.cap * 1e12 / 1e12).toFixed(0)}B</td>
+      <td class="mini-num">${Number.isFinite(d.usd_market_cap) ? fmt(d.usd_market_cap) : "—"}</td>
     </tr>`;
   }).join('');
 
@@ -147,61 +183,111 @@ function renderCrypto(data) {
   renderSentiment(data);
 }
 
-function generateSparkline(isUp, color) {
-  const pts = Array.from({length: 20}, (_, i) => {
-    const trend = isUp ? i * 1.5 : -i * 1.5;
-    return 40 - trend/3 + (Math.random() - 0.5) * 15;
-  });
-  const min = Math.min(...pts), max = Math.max(...pts);
-  const norm = pts.map(p => ((p - min) / (max - min)) * 35 + 5);
-  const path = norm.map((p, i) => `${i===0?'M':'L'}${i*4.2},${40-p}`).join(' ');
-  return `<svg viewBox="0 0 80 40" style="width:100%;height:35px;"><path d="${path}" fill="none" stroke="${color}" stroke-width="1.5" opacity="0.8"/></svg>`;
-}
-
 /* ====== CHART ====== */
 let currentPeriod = '1D';
-function setPeriod(p, btn) {
-  currentPeriod = p;
-  document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  renderChart();
+let chartData = [];
+
+async function fetchBitcoinChart() {
+  const daysByPeriod = { '1D': 1, '7D': 7, '1M': 30 };
+  const days = daysByPeriod[currentPeriod] || 1;
+  const cacheKey = `bitcoin_chart_${currentPeriod}`;
+  const cacheTimeKey = `${cacheKey}_time`;
+
+  try {
+    const cached = localStorage.getItem(cacheKey);
+    const cachedAt = Number(localStorage.getItem(cacheTimeKey));
+    if (cached && Number.isFinite(cachedAt) && Date.now() - cachedAt < 300000) {
+      const parsed = JSON.parse(cached);
+      if (Array.isArray(parsed) && parsed.length > 1) {
+        chartData = parsed;
+        renderChart();
+        return;
+      }
+    }
+  } catch (error) {
+    console.warn('Could not read chart cache:', error);
+  }
+
+  try {
+    const response = await fetch(
+      `https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}`
+    );
+    if (!response.ok) {
+      throw new Error(`Bitcoin chart request failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    if (!Array.isArray(result.prices) || result.prices.length < 2) {
+      throw new Error('Bitcoin chart response did not contain enough price points.');
+    }
+
+    chartData = result.prices;
+    try {
+      localStorage.setItem(cacheKey, JSON.stringify(chartData));
+      localStorage.setItem(cacheTimeKey, Date.now().toString());
+    } catch (error) {
+      console.warn('Could not save chart cache:', error);
+    }
+    renderChart();
+  } catch (error) {
+    console.error('Bitcoin chart could not be refreshed:', error);
+    chartData = [];
+    renderChart();
+  }
+}
+
+function setPeriod(period, button) {
+  currentPeriod = period;
+  document.querySelectorAll('.period-btn').forEach(item => item.classList.remove('active'));
+  button.classList.add('active');
+  fetchBitcoinChart();
 }
 
 function renderChart() {
-  const pts = currentPeriod === '1D' ? 48 : currentPeriod === '7D' ? 84 : currentPeriod === '1M' ? 120 : 200;
-  const basePrice = prices.bitcoin?.usd || 67000;
-  const data = [];
-  let p = basePrice * 0.85;
-  for (let i = 0; i < pts; i++) {
-    p = p * (1 + (Math.random() - 0.485) * 0.02);
-    data.push(p);
+  const chart = document.getElementById('price-chart');
+
+  if (!chartData.length) {
+    chart.innerHTML = '<text x="50%" y="50%" text-anchor="middle" fill="currentColor">Historical price data unavailable</text>';
+    return;
   }
-  data[data.length - 1] = basePrice;
 
-  const min = Math.min(...data), max = Math.max(...data);
-  const pad = (max - min) * 0.1;
-  const w = 800, h = 200;
-  const x = (i) => (i / (data.length - 1)) * w;
-  const y = (v) => h - ((v - (min-pad)) / ((max+pad) - (min-pad))) * h;
+  const data = chartData.map(point => Number(point[1])).filter(Number.isFinite);
+  if (data.length < 2) {
+    chart.innerHTML = '<text x="50%" y="50%" text-anchor="middle" fill="currentColor">Not enough historical data</text>';
+    return;
+  }
 
-  const area = `M0,${h} ` + data.map((v,i) => `L${x(i)},${y(v)}`).join(' ') + ` L${w},${h} Z`;
-  const line = data.map((v,i) => `${i===0?'M':'L'}${x(i)},${y(v)}`).join(' ');
-  const isUp = data[data.length-1] > data[0];
-  const col = isUp ? '#00ff88' : '#ff4466';
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const padding = range * 0.1;
+  const width = 800;
+  const height = 200;
+  const x = index => (index / (data.length - 1)) * width;
+  const y = value => height - ((value - (min - padding)) / (range + padding * 2)) * height;
 
-  document.getElementById('price-chart').innerHTML = `
+  const area = `M0,${height} ` +
+    data.map((value, index) => `L${x(index)},${y(value)}`).join(' ') +
+    ` L${width},${height} Z`;
+  const line = data.map((value, index) =>
+    `${index === 0 ? 'M' : 'L'}${x(index)},${y(value)}`
+  ).join(' ');
+
+  const isUp = data[data.length - 1] >= data[0];
+  const color = isUp ? '#00ff88' : '#ff4466';
+
+  chart.innerHTML = `
     <defs>
       <linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="${col}" stop-opacity="0.15"/>
-        <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
+        <stop offset="0%" stop-color="${color}" stop-opacity="0.15"/>
+        <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
       </linearGradient>
     </defs>
     <path d="${area}" fill="url(#grad)"/>
-    <path d="${line}" fill="none" stroke="${col}" stroke-width="1.5"/>
-    <circle cx="${x(data.length-1)}" cy="${y(data[data.length-1])}" r="4" fill="${col}" stroke="var(--bg)" stroke-width="2"/>
+    <path d="${line}" fill="none" stroke="${color}" stroke-width="1.5"/>
+    <circle cx="${x(data.length - 1)}" cy="${y(data[data.length - 1])}" r="4" fill="${color}" stroke="var(--bg)" stroke-width="2"/>
   `;
 }
-
 /* ====== WEATHER ====== */
 const weatherSVGs = {
   clear: `<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block;"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>`,
@@ -240,6 +326,7 @@ async function fetchWeather() {
   try {
     // Geocode
     const geoRes = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1`);
+    if (!geoRes.ok) throw new Error(`Geocoding request failed: ${geoRes.status}`);
     const geoData = await geoRes.json();
     if (!geoData.results?.length) throw new Error('City not found');
 
@@ -247,7 +334,8 @@ async function fetchWeather() {
     const { latitude, longitude, name, country } = loc;
 
     // Weather
-    const wxRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true&hourly=relativehumidity_2m,windspeed_10m,visibility&daily=weathercode,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=7`);
+    const wxRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true&hourly=relativehumidity_2m,windspeed_10m,visibility,apparent_temperature&daily=weathercode,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=7`);
+    if (!wxRes.ok) throw new Error(`Weather request failed: ${wxRes.status}`);
     const wxData = await wxRes.json();
 
     const cur = wxData.current_weather;
@@ -258,25 +346,27 @@ async function fetchWeather() {
     const temp = Math.round(cur.temperature);
     const windspeed = cur.windspeed;
 
-    // Feels like (approx wind chill)
-    const feelsLike = Math.round(temp - (windspeed * 0.05));
-    const hourIdx = 12;
-    const humid = wxData.hourly.relativehumidity_2m[hourIdx] || '...';
-    const vis = wxData.hourly.visibility[hourIdx];
+    // Match hourly measurements to the API's current-weather timestamp.
+    const hourIdx = wxData.hourly.time.indexOf(cur.time);
+    const feelsLikeValue = hourIdx >= 0 ? wxData.hourly.apparent_temperature[hourIdx] : null;
+    const humid = hourIdx >= 0
+      ? wxData.hourly.relativehumidity_2m[hourIdx] ?? '...'
+      : '...';
+    const vis = hourIdx >= 0 ? wxData.hourly.visibility[hourIdx] : null;
 
     document.getElementById('w-city').textContent = name;
     document.getElementById('w-country').textContent = country;
     document.getElementById('w-temp').textContent = `${temp}°C`;
     document.getElementById('w-icon').innerHTML = iconSVG;
     document.getElementById('w-desc').textContent = desc;
-    document.getElementById('w-feels').textContent = `${feelsLike}°C`;
+    document.getElementById('w-feels').textContent = Number.isFinite(feelsLikeValue) ? `${Math.round(feelsLikeValue)}°C` : '...';
     document.getElementById('w-humid').textContent = `${humid}%`;
     document.getElementById('w-wind').textContent = `${Math.round(windspeed)} km/h`;
-    document.getElementById('w-vis').textContent = vis ? `${(vis/1000).toFixed(1)} km` : '...';
+    document.getElementById('w-vis').textContent = Number.isFinite(vis) ? `${(vis / 1000).toFixed(1)} km` : '...';
 
     // Forecast
     document.getElementById('forecast-row').innerHTML = wxData.daily.time.map((t, i) => {
-      const d = new Date(t);
+      const d = new Date(`${t}T12:00:00`);
       const dayName = i === 0 ? 'TODAY' : days[d.getDay()];
       const fc_code = wxData.daily.weathercode[i];
       const fc_key = weatherCodes[fc_code] || 'fallback';
@@ -313,16 +403,14 @@ async function fetchSentiment() {
       throw new Error('Invalid data format');
     }
   } catch (e) {
-    // Fallback to neutral/simulated values
-    const val = 55;
-    const label = 'Neutral';
-    renderSentimentUI(val, label);
+    // Do not present a made-up neutral score as live market sentiment.
+    renderSentimentUI(null, 'Unavailable');
   }
 }
 
 function renderSentimentUI(fgi, label) {
-  const color = fgi < 30 ? 'var(--red)' : fgi < 50 ? 'var(--yellow)' : fgi < 75 ? 'var(--green)' : 'var(--green)';
-  document.getElementById('gauge-val').textContent = fgi;
+  const color = fgi === null ? 'var(--muted)' : fgi < 30 ? 'var(--red)' : fgi < 50 ? 'var(--yellow)' : 'var(--green)';
+  document.getElementById('gauge-val').textContent = fgi === null ? '—' : fgi;
   document.getElementById('gauge-val').style.color = color;
   document.getElementById('gauge-ring').style.borderColor = color;
   document.getElementById('gauge-status').textContent = label;
@@ -380,6 +468,9 @@ function renderSentiment(data) {
 /* ====== INIT ====== */
 fetchCryptoData();
 setInterval(fetchCryptoData, 30000);
+
+// Load historical Bitcoin data for the default chart period.
+fetchBitcoinChart();
 
 // Load Lagos weather by default
 document.getElementById('city-input').value = 'Lagos';
